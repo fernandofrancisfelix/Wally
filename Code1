@@ -1,0 +1,132 @@
+#include <Bluepad32.h>
+
+GamepadPtr myControllers[BP32_MAX_GAMEPADS];
+
+// BTS7960 Pin Definitions
+const int RPWM = 32; // Forward speed control pin
+const int LPWM = 33; // Reverse speed control pin
+const int R_EN = 13; // Right Enable -> Controlled by X button
+const int L_EN = 12; // Left Enable  -> Controlled by O button
+
+bool joystick_mode = false;
+unsigned long lastModeToggle = 0;
+
+void onConnectedGamepad(GamepadPtr gp) {
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (myControllers[i] == nullptr) {
+      Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
+      myControllers[i] = gp;
+      break;
+    }
+  }
+}
+
+void onDisconnectedGamepad(GamepadPtr gp) {
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (myControllers[i] == gp) {
+      Serial.printf("CALLBACK: Controller disconnected from index=%d\n", i);
+      myControllers[i] = nullptr;
+      break;
+    }
+  }
+}
+
+void stopMotor() {
+  analogWrite(RPWM, 0);
+  analogWrite(LPWM, 0);
+  digitalWrite(R_EN, LOW);
+  digitalWrite(L_EN, LOW);
+}
+
+void processGamepad(GamepadPtr gp) {
+  // Toggle mode using the PlayStation button (miscButtons bit 2)
+  if ((gp->miscButtons() & 0x04) && (millis() - lastModeToggle > 500)) { 
+    joystick_mode = !joystick_mode;
+    lastModeToggle = millis();
+    Serial.println(joystick_mode ? "Mode: Joystick" : "Mode: D-Pad");
+  }
+
+  // Read X (Cross = 0x0001) and O (Circle = 0x0002) buttons
+  uint32_t btnState = gp->buttons();
+  bool btnX = (btnState & 0x0001); // Controls Pin 13 (R_EN)
+  bool btnO = (btnState & 0x0002); // Controls Pin 12 (L_EN)
+
+  // Drive Pins 13 and 12 directly from X and O buttons
+  digitalWrite(R_EN, btnX ? HIGH : LOW);
+  digitalWrite(L_EN, btnO ? HIGH : LOW);
+
+  // Since BTS7960 requires both enables HIGH to output power, 
+  // ensure safety stop if neither button is pressed.
+  if (!btnX && !btnO) {
+    analogWrite(RPWM, 0);
+    analogWrite(LPWM, 0);
+    return;
+  }
+
+  if (joystick_mode) { 
+    int axisY = gp->axisY();  // Left stick Y (-512 to 512)
+    
+    const int deadzone = 45;
+    if (abs(axisY) < deadzone) axisY = 0;
+
+    if (axisY == 0) {
+      analogWrite(RPWM, 0);
+      analogWrite(LPWM, 0);
+      return;
+    }
+
+    int pwmVal = constrain(map(abs(axisY), 0, 512, 0, 255), 0, 255);
+
+    if (axisY < 0) { // Forward suction
+      analogWrite(RPWM, pwmVal);
+      analogWrite(LPWM, 0);
+    } else { // Reverse suction
+      analogWrite(RPWM, 0);
+      analogWrite(LPWM, pwmVal);
+    }
+  } 
+  else { // D-Pad Controls
+    uint8_t dpadVal = gp->dpad();
+    
+    if (dpadVal & 0x01) { // Up (Forward suction)
+      analogWrite(RPWM, 200);
+      analogWrite(LPWM, 0);
+    } 
+    else if (dpadVal & 0x02) { // Down (Reverse suction)
+      analogWrite(RPWM, 0);
+      analogWrite(LPWM, 200);
+    } 
+    else {
+      analogWrite(RPWM, 0);
+      analogWrite(LPWM, 0);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(RPWM, OUTPUT);
+  pinMode(LPWM, OUTPUT);
+  pinMode(R_EN, OUTPUT);
+  pinMode(L_EN, OUTPUT);
+
+  stopMotor();
+
+  BP32.setup(&onConnectedGamepad, &onDisconnectedGamepad);
+  BP32.forgetBluetoothKeys();
+  
+  Serial.println("BTS7960 Suction Controller started!");
+}
+
+void loop() {
+  BP32.update();
+  
+  if (myControllers[0] && myControllers[0]->isConnected()) {
+    processGamepad(myControllers[0]);
+  } else {
+    stopMotor();
+  }
+  
+  delay(15);
+}
